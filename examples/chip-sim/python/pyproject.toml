@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chip-sim"
+version = "0.1.0"
+description = "Agent-facing chip simulation execution layer (RTL + SoC software sim)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+chip-sim = "chip_sim.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["chip_sim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

@@ -264,6 +264,9 @@ agent iterations:
 2. Iteration 2: patch that input from iteration-1 output → submit again
    → collect a new artifact set.
 
+**At least one iteration must fail the sim** and still return parseable
+logs. An all-success loop is not sufficient.
+
 Also required: Sky130 RO extra drive mounted for the RTL path; SoC
 emulator checkpoint on disk restores without a full nested boot.
 
