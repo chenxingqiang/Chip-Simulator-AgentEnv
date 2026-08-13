@@ -360,6 +360,30 @@ Start order (mandatory):
 Forbidden as the main verification path: hand-run QEMU/Verilator demos.
 `examples/` may appear later as **debug aids**, never as P0 proof.
 
+FakeAgentEnv must **not** be an ideal world. It has to reproduce
+AgentENV failure modes the SDK will see on Firecracker: TTL expiry,
+pause destroying guest processes (emulator RAM gone unless a file
+checkpoint exists), RO extra-drive writes rejected, drive mount
+failures, envd unreachable on collect. Happy-path-only mocks are
+rejected in review.
+
+The V0 script must include a **failing** sim iteration that still
+returns parseable logs/artifacts. An all-green loop is not the agent’s
+real job.
+
+When `examples/` files are added, each entrypoint must start with:
+
+> This example is a human debug aid only. It is not stage acceptance.
+> P0/Pn acceptance is the automated `chip_sim.Client` V0 script.
+
+SDK records lightweight metrics (distinct snapshot aliases used,
+sandbox start latency). These exist so a future P2 kernel discussion
+has numbers, not anecdotes.
+
+New features and issues must pass the §13 three questions **in
+discussion before** a code PR. Code PRs that skip that review are
+rejected.
+
 ## 15. P0 implementation non-goals (tactical)
 
 Commercial job support, GUI, GPU/PCIe/dongles, nested KVM/TAP, AgentENV

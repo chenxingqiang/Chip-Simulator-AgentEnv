@@ -20,12 +20,13 @@ This project does not replace a production EDA farm. `examples/` hand
 runs do **not** prove P0.
 
 **FakeAgentEnv:** in-process mock of sandbox / extra drive / proxy so
-`chip_sim` unit tests run without Firecracker. Required before SDK
-implementation. It does **not** replace live KVM tests.
+`chip_sim` unit tests run without Firecracker. It must reproduce
+failures (TTL, pause killing processes, RO writes, mount errors, envd
+down), not only happy paths. It does **not** replace live KVM tests.
 
 | ID | Gate | Pass |
 |---|---|---|
-| V0 | Agent loop, SDK only (hard P0 bar) | Automated script calls `chip_sim.Client` for **two** iterations: (1) submit RTL or firmware → sim → collect logs; (2) patch from iteration-1 output → sim again → new artifacts. No raw `attachedDrives` JSON. Sky130 RO drive mounted on RTL path; SoC checkpoint restore works without full nested boot. Hand `examples/` runs do not count. |
+| V0 | Agent loop, SDK only (hard P0 bar) | Automated script calls `chip_sim.Client` for **two** iterations: (1) submit RTL or firmware → sim → collect logs; (2) patch from iteration-1 output → sim again → new artifacts. **At least one iteration must be a failing sim** that still returns parseable logs (not an all-green loop). No raw `attachedDrives` JSON. Sky130 RO drive mounted on RTL path; SoC checkpoint restore works without full nested boot. Hand `examples/` runs do not count. |
 | V1 | Vertical layer only | P0/V0/V1 logic is implemented in this repo’s vertical layer. Diff vs main does **not** modify upstream AgentENV kernel code under `src/`, `storage/`, or `services/`. |
 | V2 | RTL + SoC both feedback | Client-collected artifacts for RTL and SoC paths (D1/D3 via Client, not hand demo) |
 | V3 | Portable SoC scene | Checkpoint restore skips full nested boot (via Client) |
@@ -175,7 +176,8 @@ S6 vs S7 is the two-layer snapshot teaching test.
 1. FakeAgentEnv mock (sandbox/drive/proxy), no Firecracker.
 2. Config / `JobSpec` (C*, U*) including `WorkloadType`.
 3. SDK Client against FakeAgentEnv (J*, A*).
-4. Automated V0 two-iteration script on the mock (**required** before demos).
+4. Automated V0 two-iteration script on the mock, **including a failing
+   sim that still collects logs** (**required** before demos).
 5. CLI wrapper last among unit work; **not** a pass bar.
 6. Live KVM: RTL L* then SoC S* / V2 / V3 / V4.
 7. V1 checked at PR time (no `src/` / `storage/` / `services/` edits).
