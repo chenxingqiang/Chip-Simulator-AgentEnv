@@ -38,6 +38,12 @@
 
 - [E2B](./integration/e2b.md)
 
+# Verticals
+
+- [Chip-Sim Design](./vertical/chip-sim/design.md)
+- [Chip-Sim Interfaces](./vertical/chip-sim/interfaces.md)
+- [Chip-Sim Test Plan](./vertical/chip-sim/test-plan.md)
+
 # Troubleshooting
 
 - [Common Issues](./troubleshooting/common-issues.md)
