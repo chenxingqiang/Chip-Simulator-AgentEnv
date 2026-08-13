@@ -1,0 +1,67 @@
+# Operator config for the chip-sim vertical. Not AgentENV default.toml.
+
+[agentenv]
+api_url = "http://127.0.0.1:8000"
+api_key = "dummy"
+
+[policy]
+default_timeout_secs = 3600
+max_timeout_secs = 86400
+max_upload_file_bytes = 8388608
+max_upload_total_bytes = 33554432
+
+[workloads.rtl-sim]
+default_template = "chip-sim-8c"
+allowed_templates = ["chip-sim-2c", "chip-sim-8c", "chip-sim-32c"]
+ro_drive_id = "pdk"
+ro_mount = "/mnt/pdk"
+work_mount = "/mnt/work"
+work_out = "/mnt/work/out"
+
+[workloads.soc-sw-sim]
+default_template = "chip-sw-sim-4c"
+allowed_templates = ["chip-sw-sim-2c", "chip-sw-sim-4c", "chip-sw-sim-8c"]
+ro_drive_id = "soc-models"
+ro_mount = "/mnt/soc-models"
+work_mount = "/mnt/work"
+work_out = "/mnt/work/out"
+ckpt_dir = "/mnt/work/ckpt"
+serial_log = "/mnt/work/out/console.log"
+gdbstub_bind = "127.0.0.1:1234"
+qemu_netdev = "user"
+
+[templates.chip-sim-2c]
+workload = "rtl-sim"
+alias = "chip-sim-2c"
+cpu_count = 2
+memory_mib = 4096
+
+[templates.chip-sim-8c]
+workload = "rtl-sim"
+alias = "chip-sim-8c"
+cpu_count = 8
+memory_mib = 16384
+
+[templates.chip-sim-32c]
+workload = "rtl-sim"
+alias = "chip-sim-32c"
+cpu_count = 32
+memory_mib = 65536
+
+[templates.chip-sw-sim-2c]
+workload = "soc-sw-sim"
+alias = "chip-sw-sim-2c"
+cpu_count = 2
+memory_mib = 4096
+
+[templates.chip-sw-sim-4c]
+workload = "soc-sw-sim"
+alias = "chip-sw-sim-4c"
+cpu_count = 4
+memory_mib = 8192
+
+[templates.chip-sw-sim-8c]
+workload = "soc-sw-sim"
+alias = "chip-sw-sim-8c"
+cpu_count = 8
+memory_mib = 16384
