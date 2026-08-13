@@ -1,6 +1,7 @@
 # Chip-Sim Vertical: Design
 
-Status: **Design** (pending human approval before implementation)
+Status: **Approved baseline** (value, gates, and decision rules).
+SDK internals may still iterate. Implementation follows this document.
 
 A pretty architecture is not the product. Value is a chip **LLM agent**
 closing **generate → simulate → read feedback → iterate** with isolation
@@ -53,7 +54,8 @@ without a human assembling drives, ports, and logs.
   full-product farms.
 - Implement any simulator core (Verilator, QEMU, VCS, Simics stay
   external). This repo only schedules and wraps environments.
-- Human GUI in P0/P1. Agent API first; CLI is a thin debug wrapper.
+- Human GUI in P0/P1. Agent API first; CLI is a thin debug wrapper and
+  **never** an acceptance criterion at any phase.
 - Full commercial EDA as a P0/P1 must-have. Commercial tools are
   connectivity PoCs only.
 
@@ -237,27 +239,41 @@ patch, optionally `restore()` so boot is not paid every iteration.
 
 ## 10. Phases: delivery **and** value proof
 
+Standing footnote for **every** phase: the human CLI is a thin wrapper
+only — it is **not** an acceptance criterion. This project does **not**
+replace a production EDA farm.
+
 ### P0 — vertical only, zero kernel change
 
 **Value:** prove the architecture; close the **minimum** agent loop
-(generated RTL or firmware → sandbox sim → log feedback) without
-touching AgentENV. Find real blockers from that loop, not from a tool
-matrix.
+without touching upstream AgentENV. Find real blockers from that loop,
+not from a tool matrix.
 
 **Tech:** shared `chip_sim` SDK; Sky130 + RISC-V QEMU examples;
-multi-spec snapshots; serial file; in-guest gdb API.
+multi-spec snapshots; serial file; in-guest gdb API. All P0/V0/V1 logic
+lives in this repo’s **vertical layer**. It does **not** modify upstream
+AgentENV kernel code under `src/`, `storage/`, or `services/`.
 
-**Proof (must all pass):**
+**V0 value gate (hard P0 pass — no other substitute):**
 
-1. A script using **only** `chip_sim.Client` (no raw sandbox drive
-   JSON) completes generate→sim→read-log→second sim with a patch.
-2. AgentENV tree under `src/` / `storage/` / `services/` is unmodified.
-3. Sky130 RTL adder and RISC-V virt serial demo both produce collected
-   artifacts.
-4. QEMU checkpoint restore skips full boot (portable failure scene).
+An automated script calls `chip_sim.Client` and completes **two** full
+agent iterations:
 
-Hand-running QEMU inside `aenv exec` **without** the SDK does **not**
-count as P0 done.
+1. Iteration 1: submit RTL (or firmware) input → start the sim
+   environment → collect sim logs/artifacts.
+2. Iteration 2: patch that input from iteration-1 output → submit again
+   → collect a new artifact set.
+
+Also required: Sky130 RO extra drive mounted for the RTL path; SoC
+emulator checkpoint on disk restores without a full nested boot.
+
+`examples/` trees are **human debug aids**. Running them by hand **cannot**
+prove P0. Only the automated SDK script counts.
+
+Hand-running Verilator/QEMU under `aenv exec` does **not** count.
+
+**Other P0 proofs:** V1 (no kernel path edits), V2 (RTL + SoC artifacts
+via Client), V4 (crash still yields logs or `artifacts_lost`).
 
 ### P1 — agent-facing semantics
 
@@ -268,16 +284,28 @@ artifact export become business APIs so the agent never speaks AgentENV.
 checkpoint up/download; object-store collect.
 
 **Proof:** an agent (or recorded agent script) runs a job through
-`chip_sim` only; checkpoint replay works; license checkout count stays
-bounded under pause storms (Fake or live sidecar).
+`chip_sim` only; checkpoint replay works.
+
+License: implement **pause delayed-release** so frequent
+checkout/release jitter is bounded. This does **not** require a full
+license audit trail or reporting dashboard (that is a later, derived
+track).
 
 ### P2 — optional kernel patch
 
 **Value:** only if measured snapshot-cardinality cost blocks the agent
 loop. Not a feature checklist.
 
-**Proof:** production-like template count or ops cost is documented as
-unacceptable **before** any warm-start resource override lands.
+**P2 may start only if at least one measured bar is met:**
+
+- The business resource matrix requires **≥ 10** snapshot aliases, and
+  image maintenance cost is documented as unacceptable; **or**
+- Agent load tests show that switching resource specs via many snapshots
+  adds storage/pull latency that **materially slows** the generate→sim
+  loop.
+
+No such data → **no** AgentENV kernel edit. “Snapshots are annoying”
+in conversation is not evidence.
 
 ### P3 — concurrent agent farm (still not a product EDA cluster)
 
@@ -303,15 +331,38 @@ reproduce without the original sandbox remaining running.
 4. Homegrown scheduler/storage → duplicate AgentENV, higher maintenance.
 5. Positioning as “next-gen full EDA cluster” → wrong SLAs, wrong users.
 
-## 13. Review questions (use these, not “is the design complete?”)
+## 13. Change-review checklist (required on every design/code PR)
 
-1. What **agent** problem does this change solve? What value is lost if
-   we skip it?
-2. Is there an upper-layer alternative? Must the kernel change?
-3. Is this P0 (loop-blocking) or a later enhancement?
+A PR that cannot answer these is rejected:
 
-## 14. P0 implementation non-goals (tactical)
+1. Which **concrete agent-loop** problem does this change solve? (No
+   answer → reject.)
+2. Can it live in this repo’s vertical layer? Must AgentENV kernel
+   change? Without the P2 evidence bars in §10, kernel edits are
+   forbidden.
+3. Is this P0 loop-blocking, or a P1/P2/P3 enhancement? Do not smuggle
+   later work into an early milestone.
 
-Listed so P0 coding cannot smuggle scope: commercial job support, GUI,
-GPU/PCIe/dongles, nested KVM/TAP, AgentENV source changes, in-process
-hooks, fork in demos, raw TCP forwarding.
+## 14. Development order and FakeAgentEnv
+
+Approved baseline covers **positioning, value gates, acceptance, and
+decision rules**. It does **not** freeze SDK internals.
+
+Start order (mandatory):
+
+1. **FakeAgentEnv** — in-process mock of sandbox / extra drive / proxy.
+   Lets `chip_sim` business logic run as local unit tests **without**
+   Firecracker. It does **not** replace later live integration tests.
+2. **SDK Client** against that mock, including the V0 two-iteration
+   script.
+3. Live integration (KVM) only after V0 is green on the mock.
+
+Forbidden as the main verification path: hand-run QEMU/Verilator demos.
+`examples/` may appear later as **debug aids**, never as P0 proof.
+
+## 15. P0 implementation non-goals (tactical)
+
+Commercial job support, GUI, GPU/PCIe/dongles, nested KVM/TAP, AgentENV
+source changes, in-process hooks, fork in demos, raw TCP forwarding.
+Human CLI is never an acceptance criterion. This project does not
+replace a production EDA farm.
