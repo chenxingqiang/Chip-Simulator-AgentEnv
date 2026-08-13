@@ -55,9 +55,12 @@ Skipped checks and reasons:
 
 <!-- Identify correctness, security, compatibility, resource, and operational risks. Point reviewers to the most important files or commits. -->
 
-## Checklist
+## Chip-sim change review (required)
 
-- [ ] The PR contains one coherent change and no unrelated formatting or refactoring.
-- [ ] New behavior is covered by tests, or I explained why testing is impractical.
-- [ ] Logs and examples contain no credentials, tokens, or private registry information.
-- [ ] I did not manually edit generated code without updating its source and regenerating it.
+<!-- Answer all three. A PR that cannot is rejected. See docs/src/vertical/chip-sim/design.md §13. -->
+
+1. Which concrete **agent-loop** problem does this change solve?
+2. Can it live in this repo’s vertical layer? Must AgentENV kernel change? (P2 evidence bars required for kernel edits.)
+3. Is this P0 loop-blocking, or a P1/P2/P3 enhancement?
+
+- [ ] Discussed the three questions before writing code (no drive-by implementation PRs)
