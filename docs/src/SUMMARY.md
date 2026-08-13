@@ -40,7 +40,7 @@
 
 # Verticals
 
-- [Chip-Sim Design](./vertical/chip-sim/design.md) (RTL + SoC software sim)
+- [Chip-Sim Design](./vertical/chip-sim/design.md) (agent-loop value; RTL + SoC)
 - [Chip-Sim Interfaces](./vertical/chip-sim/interfaces.md)
 - [Chip-Sim Test Plan](./vertical/chip-sim/test-plan.md)
 

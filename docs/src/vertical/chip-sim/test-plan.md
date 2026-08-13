@@ -3,9 +3,25 @@
 Cases for [design.md](./design.md) and [interfaces.md](./interfaces.md).
 P0 tests are written **before** SDK code (TDD).
 
+P0 is **not** done when QEMU/Verilator runs under `aenv exec`. It is done
+when a script that uses **only** `chip_sim.Client` completes two
+iterations (code → sim → log → patched code → sim) and collects
+artifacts, with no AgentENV kernel changes. That is value gate **V0**
+below; L*/S*/D* support it, they do not replace it.
+
 Shared unit tests: `examples/chip-sim/python/tests/`.
 SoC demo/live tests may live next to `examples/chip-sw-sim/demos/`.
 No `/dev/kvm` unless tagged `live`.
+
+## 0. Value gates
+
+| ID | Gate | Pass |
+|---|---|---|
+| V0 | Agent loop, SDK only | Script calls `Client` twice with a code patch between runs; both yield collected logs; no raw `attachedDrives` JSON in the script |
+| V1 | Zero kernel change | Diff vs main has no edits under `src/`, `storage/`, `services/` for P0 |
+| V2 | RTL + SoC both feedback | D1 and D3 artifacts present on the client |
+| V3 | Portable SoC scene | D4 restore skips full nested boot |
+| V4 | Failure still teaches | Forced kill/unreachable envd → `artifacts_lost` or pulled logs, never silent empty |
 
 ## 1. P0 unit tests (no KVM)
 
@@ -149,7 +165,9 @@ S6 vs S7 is the two-layer snapshot teaching test.
 1. Config / `JobSpec` (C*, U*) including `WorkloadType`.
 2. FakeAgentEnv job machine (J*, A*) covering RTL and SoC emulator flags.
 3. CLI (CLI*).
-4. RTL live L* / D1–D2.
-5. SoC live S* / D3–D4 (serial then checkpoint).
+4. Value gate V0 on FakeAgentEnv (two-iteration loop, SDK only).
+5. RTL live L* / D1–D2 and V2-RTL.
+6. SoC live S* / D3–D4 (serial then checkpoint) and V3.
+7. V1 checked at PR time (no kernel paths).
 
 No production module without a failing test from this list.

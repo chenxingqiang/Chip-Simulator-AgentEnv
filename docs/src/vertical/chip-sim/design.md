@@ -2,299 +2,316 @@
 
 Status: **Design** (pending human approval before implementation)
 
-A layer above AgentENV for two chip workloads that share storage, TTL,
-license, and artifact machinery. AgentENV runtime changes stay optional.
+A pretty architecture is not the product. Value is a chip **LLM agent**
+closing **generate → simulate → read feedback → iterate** with isolation
+and reproducibility. Human engineers and the AgentENV platform team are
+secondary beneficiaries.
 
 Related docs:
 
 - [Interfaces and repository layout](./interfaces.md)
 - [Test plan](./test-plan.md)
 
-## 1. Goal
+## 1. Why this exists
 
-Give LLM agents (and a thin CLI wrapper) two job kinds on the same SDK:
+This project is **not** a simulator and **not** a replacement for a
+production EDA farm. It is an **agent-facing simulation execution layer**
+on AgentENV: the missing piece between “generic sandbox” and “chip agent
+loop”.
 
-| `workloadType` | What it simulates | P0 tools |
+| Audience | Priority | What they get |
 |---|---|---|
-| `rtl-sim` | Verilog hardware (RTL + testbench) | Verilator, Yosys, cocotb |
-| `soc-sw-sim` | Virtual SoC running firmware / OS / drivers | QEMU (RISC-V virt first), Renode |
+| LLM chip agent | **Primary** | Short iteration; stable, isolated envs; one API for RTL and SoC software sim; PDK/model sharing; license control; failure artifacts |
+| Human chip engineer | Secondary | Small-scale debug and replay of agent bugs — not 7×24 product regression |
+| AgentENV platform | Constraint | Simulation is a **workload on** sandboxes. Kernel changes only when a business loop is blocked |
 
-Neither path modifies AgentENV. They differ in images, extra drives, and
-upper-layer semantics (waveforms vs serial/GDB/SoC checkpoints).
+Compared with alternatives:
 
-## 2. Decisions (locked)
+| Option | Gap for an LLM agent |
+|---|---|
+| Traditional EDA farm | Built for humans; no sub-second env snapshots; weak isolation for untrusted generated code |
+| Raw AgentENV | Generic sandbox; agent must invent PDK drives, license, artifacts, SoC checkpoints |
+| Homegrown sim cluster | Heavy; no agent-friendly snapshot/API |
 
-| # | Question | Decision |
+### 1.1 Goals
+
+1. An execution base for chip LLM agents: RTL hardware sim **and** SoC
+   software sim in one closed loop.
+2. Prove that AgentENV can host that load with **minimal kernel change**.
+3. Failure scenes must be reproducible; artifacts persist; resources and
+   licenses stay isolated and controllable.
+4. Ship runnable examples, an Agent API, and docs the agent can call
+   directly.
+
+Success is **not** “Verilator/QEMU demo boots in a Firecracker VM”.
+Success is the agent getting sim feedback and changing the next patch
+without a human assembling drives, ports, and logs.
+
+### 1.2 Non-goals
+
+- Replace the company’s production EDA regression cluster or take 7×24
+  full-product farms.
+- Implement any simulator core (Verilator, QEMU, VCS, Simics stay
+  external). This repo only schedules and wraps environments.
+- Human GUI in P0/P1. Agent API first; CLI is a thin debug wrapper.
+- Full commercial EDA as a P0/P1 must-have. Commercial tools are
+  connectivity PoCs only.
+
+### 1.3 Pseudo-value (reject in review)
+
+1. Hand-running a sim sample in a sandbox with no agent loop.
+2. “All tools” in phase one (VCS + Simics + licenses + anti-VM) while the
+   agent loop still does not close.
+3. A heavy homegrown job scheduler that reimplements AgentENV.
+4. Early AgentENV kernel patches that raise upgrade risk for every
+   sandbox tenant.
+5. Treating a human-facing product regression farm as the primary goal.
+
+## 2. Design choices → pain → value
+
+Every technical move must answer: **what agent pain does this remove?**
+
+| Design | Pain if we skip it | Value |
 |---|---|---|
-| 1 | RTL toolchain (P0) | Open-source only: Verilator, Yosys, cocotb, pytest. Commercial VCS is a later connectivity PoC. |
-| 2 | Interaction | One Agent-facing SDK. Human `aenv sim …` wraps that SDK. No second implementation. |
-| 3 | RTL PDK (P0) | Public Sky130. Internal foundry PDKs replace the extra-drive image later. |
-| 4 | Hot-start CPU/memory override | **Do not change AgentENV.** Publish resource-specific snapshots per workload. |
-| 5 | SoC tools (P0) | Open-source QEMU (RISC-V virt first) and Renode. Simics is a later connectivity PoC, not a P0 job type. |
-| 6 | Debug in P0 | **Serial to file** is required. **GDB runs inside the sandbox** via envd against a localhost gdbstub. No remote TCP GDB, no port allocator. A WebSocket-to-TCP bridge through `/proxy` is P1. |
+| Vertical layer; no AgentENV kernel change unless blocked | Kernel regressions and upgrade drag hit every sandbox product | Fast sim-layer iteration; platform stays stable |
+| OCI + overlaybd RO extra drive for PDK / SoC models | Tens of GB recopied per job; slow start; disk blow-up | On-demand load + host page cache; concurrent agents share lowers |
+| Template snapshots for warm start | Rebuilding the EDA/QEMU image every iteration (minutes) | Env attach in milliseconds; more agent loops per hour |
+| Two snapshot layers (sandbox memory vs emulator checkpoint) | Pause vs SoC-state confusion; lost debug scenes | Idle host CPU without losing a portable nested-machine scene |
+| customExtension license + idle-release | Agents stampede FlexLM; random job death | Bounded checkout; pause does not thrash licenses |
+| One SDK, `rtl-sim` and `soc-sw-sim` | Two stacks, two error/artifact stories | One generate→sim→feedback API |
+| RW extra drive for workspace / VCD / dumps | Rootfs too small; artifacts die with the VM | Agent still has logs after sandbox teardown |
+| SDK TTL/resource checks; multi-spec snapshots | Warm start cannot override CPU/RAM | Large sims without a kernel patch |
+| Pull artifacts on success **and** crash; never stop-hook-only | Panic/TTL kill drops VCD/console; agent has nothing to learn from | Every terminal state yields feedback or an explicit `artifacts_lost` |
 
-Additional locks:
+## 3. Decisions (locked), with value tradeoffs
 
-- P0 does **not** use `fork`. Regressions batch-create sandboxes.
-- P0 does **not** require a custom extension (no licenses).
-- P2 AgentENV patches are **not** a launch gate.
-- In-process lifecycle hooks are **out of scope**. P1, if needed, is a
-  localhost HTTP sidecar.
-- Nested KVM is unavailable. QEMU inside the sandbox is **TCG only**.
-- QEMU networking is **user-net (SLIRP) only**. No TAP/TUN for the nested NIC.
-- SoC machine models live on a read-only extra drive (`/mnt/soc-models`),
-  not a PDK drive.
+| # | Decision | Value tradeoff |
+|---|---|---|
+| 1 | P0 RTL: Verilator / Yosys / cocotb only. VCS later PoC. | Commercial license/anti-VM work delays the agent loop. Close the loop first. |
+| 2 | Agent SDK first. CLI wraps the same client. | This product exists for chip LLM agents. A human-first CLI spends the budget on the wrong user. |
+| 3 | P0 PDK: public Sky130. | Avoids foundry NDAs so we can prove overlaybd sharing quickly. |
+| 4 | No AgentENV CPU/RAM override. Multi-spec snapshots. | Kernel edits risk the whole platform. Revisit P2 only if snapshot cardinality is measured as too costly. |
+| 5 | P0 SoC: QEMU (RISC-V virt first) + Renode. Simics later PoC. | Same as (1): do not inflate scope before the loop works. |
+| 6 | P0 debug: **serial file + in-sandbox gdb API**. No raw proxy ports. P1 may add a WS bridge with opaque handles. | Firmware agents need inspect/feedback. They do **not** need to see Firecracker proxy headers or gdbstub TCP. |
 
-## 3. Workload comparison
+Additional locks (platform risk, not features):
+
+- P0 does not use `fork` (batch-create instead).
+- P0 has no custom extension (no licenses yet).
+- P2 kernel patches are **not** a launch gate.
+- Nested KVM unavailable → QEMU **TCG only**.
+- Nested TAP forbidden → QEMU **user-net only**.
+- SoC models on `/mnt/soc-models`, not a PDK drive.
+
+## 4. Workloads (what the agent actually runs)
 
 | | `rtl-sim` | `soc-sw-sim` |
 |---|---|---|
-| Object | Verilog hardware | Pre-built C SoC model + software stack |
-| Inputs | RTL, testbench, PDK | ELF, U-Boot, kernel, dtb, rootfs |
-| CPU shape | Saturated, minutes–hours | Burst + idle on I/O |
-| Outputs | VCD/FSDB, sim log | Serial/console, dmesg, coredump |
-| Checkpoint that matters | AgentENV snapshot of the **tool** environment | QEMU/Renode **machine** checkpoint on `/mnt/work` (see §5.7) |
-| Agent loop | Edit RTL → rebuild sim | Edit firmware → boot or restore SoC |
+| Agent writes | Verilog + testbench | Firmware, drivers, kernel patches |
+| Tools (P0) | Verilator, Yosys, cocotb | QEMU, Renode, gdb-multiarch |
+| Shared RO drive | `/mnt/pdk` Sky130 | `/mnt/soc-models` dtb/bootrom |
+| Feedback | sim.log, VCD | console.log, dmesg, gdb text |
+| Loop | Edit RTL → rebuild sim | Edit firmware → boot or restore checkpoint |
 
-## 4. Shared architecture
+One client. The agent must not learn two sandbox stacks.
+
+## 5. Architecture (how the loop is hosted)
+
+Pain: raw AgentENV gives create/exec/files, not “run this RTL” or
+“restore this SoC crash”.
 
 ```
-Chip agent ──► chip_sim.Client ──► AgentENV HTTP / envd
-                    │
-                    ├── rtl-sim snapshots:     chip-sim-{2c,8c,32c}
-                    ├── soc-sw-sim snapshots:  chip-sw-sim-{2c,4c,8c}
-                    ├── RO extra drive:        /mnt/pdk  or  /mnt/soc-models
-                    ├── RW extra drive:        /mnt/work
-                    └── artifacts via envd (+ object store in P1)
+Chip LLM agent ──► chip_sim.Client ──► AgentENV HTTP / envd
+                       │
+                       ├── rtl-sim snapshots:     chip-sim-{2c,8c,32c}
+                       ├── soc-sw-sim snapshots:  chip-sw-sim-{2c,4c,8c}
+                       ├── RO extra drive:        /mnt/pdk or /mnt/soc-models
+                       ├── RW extra drive:        /mnt/work
+                       └── artifacts (envd; object store in P1)
 ```
 
-| Mount | `rtl-sim` | `soc-sw-sim` |
+Warm start from a **pre-baked** alias. Cold start is the operator recipe
+that publishes that alias, not the agent hot path.
+
+## 6. Runtime facts the agent loop depends on
+
+Checked in-tree. Wrong assumptions here destroy the “reproducible
+failure” value.
+
+### 6.1 Fork (unused in P0)
+
+Overlaybd COW on extra drives (RO shared; RW sealed lower + new upper).
+P0 still batch-creates: fork pauses the source, multiplies P1 licenses,
+stays on one node, and inherits dirty work.
+
+### 6.2 Read-only drives are host-enforced
+
+Firecracker `is_read_only` + overlaybd absent upper. Guest mount may omit
+`-o ro`. SDK fails closed if the RO drive is missing or writable — PDK
+integrity is an agent-isolation requirement.
+
+### 6.3 TTL
+
+Node `default_sandbox_timeout_secs` (15) is a **default**, not a max.
+Refresh is capped at 3600s. SDK always sends an explicit timeout so a
+long sim is not killed before the agent reads the log.
+
+### 6.4 Stop hooks are best-effort
+
+Pause/delete/Drop may never deliver `stop`. Artifact value requires SDK
+pull on every terminal path (§8).
+
+### 6.5 No COPY/ADD in `aenv build`
+
+Large trees go on extra-drive images so the agent hot path stays upload
+of **small diffs**, not PDK copies.
+
+### 6.6 Custom extension is HTTP-only
+
+P0: none. P1: `127.0.0.1` sidecar. In-process hooks would be a kernel
+change — rejected as pseudo-value.
+
+### 6.7 Two snapshot layers (reproducible SoC failures)
+
+**Pain:** treating AgentENV pause as “QEMU died, nested Linux is gone”
+**or** as “pause is a portable SoC checkpoint” both break agent replay.
+
+AgentENV pause **does** snapshot Firecracker guest RAM. The same sandbox
+resume restores QEMU and nested SoC RAM. GDB/network sessions drop.
+
+| Layer | Agent value | Cost |
 |---|---|---|
-| User rootfs | Verilator / Yosys / cocotb | QEMU / Renode / gdb-multiarch |
-| RO extra drive | `/mnt/pdk` (Sky130) | `/mnt/soc-models` (dtb, bootrom, machine JSON) |
-| RW extra drive | RTL, TB, VCD, logs | kernel/elf, QEMU ckpt, serial log, coredump |
+| Pause / snapshot **while QEMU runs** | Idle the host; continue the **same** job | ≈ sandbox `memoryMB` |
+| Template snapshot **before QEMU** | Fast empty tools env | Small; **no** nested OS |
+| QEMU/Renode file on `/mnt/work/ckpt` | Replay a crash on a **new** tools sandbox | Nested RAM only |
 
-Resource variants still use **multiple snapshots**, not a runtime CPU
-override. Cold-start once per alias, then warm-start jobs from that alias.
+Agent API: `Job.checkpoint()` is the portable failure scene. Pause is
+host-resource management, not the crash-dump format.
 
-## 5. Runtime facts that affect both workloads
+### 6.8 Two networks
 
-Checked in-tree. The vertical must not assume otherwise.
+Sandbox `allowOut` = QEMU **process** (git/license). Nested NIC = QEMU
+**user-net only**. No nested TAP/KVM. Agents do not get a high-perf
+virtio-tap farm; they get a safe, isolated firmware loop.
 
-### 5.1 Fork and extra drives (COW, unused in P0)
+### 6.9 Proxy is HTTP/WS, not GDB TCP
 
-Fork pauses the source, restacks overlaybd uppers, resumes the source, then
-starts children from that snapshot.
+**Pain:** leaking `x-agentenv-target-port` into the agent prompt is
+unsafe and unusable for gdb remote protocol.
 
-- RO drives: shared lowers, no restack.
-- RW work: sealed upper becomes a shared lower; each child gets a new upper.
-- P0 still avoids fork (source pause, `start-resume` license multiplication
-  in P1, same-node only, dirty work inherited). OpenAPI `count` max is 100.
+P0 value: `Job.console_log()` and `Job.gdb(...)` (in-guest). P1 may add
+opaque WS debug handles. Never teach the agent raw `/proxy` + gdbstub.
 
-### 5.2 `readOnly` extra drives are host-enforced
+## 7. License (P1) — keep the loop stable under concurrency
 
-1. Overlaybd uses `ResolvedUpperMode::Absent` (no writable upper).
-2. Firecracker sets virtio-blk `is_read_only`.
+Pain: N agents × pause/resume = FlexLM storms.
 
-Guest init mounts extra drives without `-o ro`. That is hardening, not the
-security boundary. The SDK fails closed if the RO drive is missing or
-writable.
+`interactive`: hold license; prefer emulator checkpoint over pause.
+`batch`: pause allowed; release after `licenseIdleReleaseSecs` (default
+60s). Keyed by `(sandboxId, sandboxInstanceId)`.
 
-### 5.3 TTL is a default, plus one real cap
+## 8. Artifacts — the agent’s only teacher
 
-`default_sandbox_timeout_secs` (15) applies only when create/resume omits
-`timeout`. Create / `POST /timeout` have no documented max besides `int32`.
-`POST /sandboxes/{id}/refreshes` **maximum is 3600**.
+If the sim dies and logs vanish, the loop has **zero** value.
 
-SDK policy: always send an explicit timeout (default 1 h, max 24 h);
-long jobs use `/timeout`, not refreshes-as-only-keepalive.
-
-### 5.4 Stop hooks are best-effort
-
-`stop` runs on pause, delete, and Drop. It is not a reliable artifact
-exporter. Collection policy is §7.
-
-### 5.5 Template build cannot COPY/ADD
-
-Small files: envd. Large trees (RTL, kernels, SoC models): extra-drive
-images.
-
-### 5.6 Custom extension is HTTP-only
-
-`[custom_extension].url`. P0 ships none. P1 is `127.0.0.1`.
-
-### 5.7 Two snapshot layers (SoC — do not confuse them)
-
-AgentENV pause is **not** “kill the VM and drop RAM”. Pause captures
-Firecracker guest memory (`process_vm_readv` → overlaybd memory layers),
-stops the VMM, and releases the netns. Resume restores that memory. A
-QEMU process inside the sandbox **is restored**, including nested SoC RAM.
-
-| Layer | What it stores | Restores nested Linux/RTOS? | Cost |
-|---|---|---|---|
-| AgentENV pause / committed snapshot taken **while QEMU is running** | Entire Firecracker guest RAM + disks | **Yes**, same sandbox (or snapshot clone) | ≈ sandbox `memoryMB` (e.g. 8 GiB) plus disk deltas |
-| AgentENV template snapshot taken **before QEMU starts** | Toolchain only | **No** | Small |
-| QEMU/Renode native checkpoint on `/mnt/work` | Nested machine only | **Yes**, on a **fresh** tools sandbox | Nested RAM (often tens–hundreds of MiB) |
-
-Use each layer on purpose:
-
-- Same sandbox, idle the host: AgentENV pause/resume is valid. GDB and
-  nested network sessions drop; the SoC CPU/RAM come back.
-- Survive **delete**, a new tools sandbox, or a cheap portable artifact:
-  QEMU/Renode checkpoint to `/mnt/work/ckpt/`. **This is the SoC job
-  API.** Do not tell agents that pause replaces it.
-- Do not take an 8 GiB Firecracker memory snapshot just to save a 256 MiB
-  RISC-V guest. Checkpoint the emulator, then pause or delete.
-
-Required SoC flow before pause-that-will-be-followed-by-a-new-sandbox or
-delete:
-
-1. `Job.checkpoint()` → file on `/mnt/work`.
-2. Optional AgentENV pause (releases host CPU; file remains on the RW drive).
-3. Resume or new job: start QEMU with `-incoming` / Renode load from that file.
-
-### 5.8 Two networks and no nested TAP
-
-| Plane | Role | Mechanism |
+| | `rtl-sim` | `soc-sw-sim` |
 |---|---|---|
-| Sandbox egress | QEMU/Renode **process** → git, license | `network.allowOut` / `denyOut` |
-| Nested guest NIC | Linux/RTOS inside QEMU | **QEMU user-net only** (`-netdev user,id=net0`) |
+| Happy / fail | `out/sim.log`, VCD | `out/console.log`, dmesg, coredump |
+| Portable scene | n/a | `ckpt/**` |
+| Crash / TTL | envd pull or `artifacts_lost` | same |
 
-Firecracker already uses a host TAP for the sandbox `eth0`. The vertical
-must not create a nested TAP for QEMU:
+P0 pulls on `wait`/`close`. Object store + tail: P1.
 
-- Nested `/dev/kvm` is not provided; QEMU is TCG.
-- Nested TAP/TUN is unsupported for this product. Even if the guest kernel
-  has `CONFIG_TUN`, do not bridge QEMU onto it.
-- User-net is SLIRP: enough for DHCP-like outbound from the nested OS,
-  not a high-performance virtio-tap farm.
+## 9. Agent loops (the product)
 
-### 5.9 Proxy is HTTP / SSE / WebSocket, not raw TCP
+### RTL
 
-`/proxy` forwards HTTP and WebSocket to `x-agentenv-target-port`. It does
-**not** forward gdb remote protocol or telnet.
+Warm-start `chip-sim-8c` → upload generated Verilog → `wait()` → parse
+`sim.log` → patch → repeat. Many cases: N jobs, no fork.
 
-Consequences (locks decision 6):
+### SoC software
 
-- P0 serial: QEMU `-serial file:/mnt/work/out/console.log` (and/or stdio
-  captured by envd). Agent reads the file.
-- P0 GDB: QEMU `-gdb tcp:127.0.0.1:1234` and `gdb-multiarch` **inside**
-  the sandbox via `Job.run`. The agent never opens host TCP:1234.
-- P1 optional: a guest WebSocket-to-TCP bridge (e.g. serial or gdbstub)
-  so an external debugger can use `/proxy` WebSocket. Port allocation
-  stays in the SDK; AgentENV is unchanged.
+Warm-start `chip-sw-sim-4c` → upload firmware → `start_emulator()` →
+read `console_log` / `gdb` → `checkpoint()` on panic → collect → next
+patch, optionally `restore()` so boot is not paid every iteration.
 
-## 6. License and pause (P1)
+## 10. Phases: delivery **and** value proof
 
-Same policy for VCS and Simics. P0 has no FlexLM.
+### P0 — vertical only, zero kernel change
 
-| Mode | Pause | License |
+**Value:** prove the architecture; close the **minimum** agent loop
+(generated RTL or firmware → sandbox sim → log feedback) without
+touching AgentENV. Find real blockers from that loop, not from a tool
+matrix.
+
+**Tech:** shared `chip_sim` SDK; Sky130 + RISC-V QEMU examples;
+multi-spec snapshots; serial file; in-guest gdb API.
+
+**Proof (must all pass):**
+
+1. A script using **only** `chip_sim.Client` (no raw sandbox drive
+   JSON) completes generate→sim→read-log→second sim with a patch.
+2. AgentENV tree under `src/` / `storage/` / `services/` is unmodified.
+3. Sky130 RTL adder and RISC-V virt serial demo both produce collected
+   artifacts.
+4. QEMU checkpoint restore skips full boot (portable failure scene).
+
+Hand-running QEMU inside `aenv exec` **without** the SDK does **not**
+count as P0 done.
+
+### P1 — agent-facing semantics
+
+**Value:** hide sandbox/drive/proxy. License jitter, debug handles, and
+artifact export become business APIs so the agent never speaks AgentENV.
+
+**Tech:** sidecar `workloadType`; license idle TTL; WS debug handles;
+checkpoint up/download; object-store collect.
+
+**Proof:** an agent (or recorded agent script) runs a job through
+`chip_sim` only; checkpoint replay works; license checkout count stays
+bounded under pause storms (Fake or live sidecar).
+
+### P2 — optional kernel patch
+
+**Value:** only if measured snapshot-cardinality cost blocks the agent
+loop. Not a feature checklist.
+
+**Proof:** production-like template count or ops cost is documented as
+unacceptable **before** any warm-start resource override lands.
+
+### P3 — concurrent agent farm (still not a product EDA cluster)
+
+**Value:** many agents in parallel; failed jobs replayable; artifacts
+complete. Still not “replace the EDA farm”.
+
+**Proof:** N concurrent jobs; a failed job’s env/artifacts suffice to
+reproduce without the original sandbox remaining running.
+
+## 11. Remaining gaps (upper layer only)
+
+| Gap | P0 handling | Why not kernel |
 |---|---|---|
-| `interactive` | Avoid pause; keep sandbox or use emulator checkpoint + short pause | Hold until job end or idle TTL |
-| `batch` | Pause allowed after emulator checkpoint | Release after `licenseIdleReleaseSecs` (default 60s) |
+| Remote GDB TCP | In-guest `Job.gdb`; serial file | Proxy is HTTP/WS; TCP proxy is a new platform surface |
+| Nested TAP / KVM | Forbidden; TCG + user-net | Firecracker guest has no nested KVM product path |
+| Portable SoC state | Emulator checkpoint files | Pause already restores **same** sandbox RAM |
 
-```json
-{
-  "chipSim": {
-    "workloadType": "soc-sw-sim",
-    "mode": "interactive",
-    "project": "cpu-core",
-    "soc": "rv64-virt",
-    "pdk": "sky130",
-    "licenseFeatures": [],
-    "licenseIdleReleaseSecs": 60
-  }
-}
-```
+## 12. Value-decay risks
 
-Sidecar keys checkout by `(sandboxId, sandboxInstanceId)`.
+1. Kernel edits before the agent loop exists → launch blocked, no value.
+2. Commercial tool sprawl in P0 → loop never closes.
+3. Demos without an SDK-only closed loop → architecture unproven.
+4. Homegrown scheduler/storage → duplicate AgentENV, higher maintenance.
+5. Positioning as “next-gen full EDA cluster” → wrong SLAs, wrong users.
 
-## 7. Artifact collection
+## 13. Review questions (use these, not “is the design complete?”)
 
-Never rely on stop-hook-only export.
+1. What **agent** problem does this change solve? What value is lost if
+   we skip it?
+2. Is there an upper-layer alternative? Must the kernel change?
+3. Is this P0 (loop-blocking) or a later enhancement?
 
-| Path | `rtl-sim` | `soc-sw-sim` |
-|---|---|---|
-| Happy path | `/mnt/work/out/**` (sim.log, VCD) | `/mnt/work/out/**` (console.log, dmesg, coredump) |
-| Checkpoint files | n/a | `/mnt/work/ckpt/**` collected when present |
-| Unclean / TTL | envd pull or `artifacts_lost` | same |
-| Long job tail (P1) | `sim.log` | `console.log` |
+## 14. P0 implementation non-goals (tactical)
 
-P0: collect on `wait`/`close`. Object store and incremental tail: P1.
-
-## 8. Agent loops
-
-### 8.1 RTL (`rtl-sim`)
-
-Warm-start `chip-sim-8c` → upload RTL → `make sim` → parse log → iterate.
-Regression: N × `create_job`, no fork.
-
-### 8.2 SoC software (`soc-sw-sim`)
-
-1. Warm-start `chip-sw-sim-4c`.
-2. Upload kernel/elf (small) or mount them from `/mnt/soc-models`.
-3. Start QEMU: serial to `console.log`, gdbstub on `127.0.0.1:1234`, user-net.
-4. Agent reads console via files API; optional in-guest gdb via `Job.run`.
-5. `Job.checkpoint()` writes `/mnt/work/ckpt/<id>`.
-6. Pause or delete the sandbox (checkpoint file stays on the RW drive if
-   the sandbox is only paused; copy out with `collect` if deleting).
-7. Continue: resume (QEMU still in RAM) **or** new sandbox + QEMU restore
-   from the checkpoint file (no full nested boot).
-8. Regression: batch-create sandboxes, one firmware case each.
-
-## 9. Phases
-
-### P0 — zero runtime changes
-
-RTL (`examples/chip-sim`):
-
-- Images + Sky130 drive + aliases `chip-sim-{2c,8c,32c}`.
-- Demos: adder; batch regression (no fork).
-
-SoC (`examples/chip-sw-sim`):
-
-- QEMU/Renode image + `soc-models` drive + aliases `chip-sw-sim-{2c,4c,8c}`.
-- Demo 1: RISC-V virt, prebuilt mini Linux, capture serial to file.
-- Demo 2: QEMU checkpoint save/restore, no full reboot.
-- No Simics. No remote GDB. No TAP.
-
-Shared Python package `chip_sim` with `WorkloadType`.
-
-### P1 — sidecar + ports + artifacts
-
-- `workloadType` in sidecar params (`rtl-sim` / `soc-sw-sim`).
-- License idle TTL (VCS + Simics connectivity).
-- SoC: WebSocket-to-TCP bridge + SDK port handles; checkpoint upload/download
-  helpers.
-- Object-store sink + log tail.
-- Fork probe only; regressions still batch-create.
-
-### P2 — optional AgentENV patches
-
-Unchanged: multi-snapshot first; warm-start resource override only with
-evidence. Guest extra-drive `-o ro`. Resource-aware scheduler.
-
-### P3 — job API
-
-One `Job` resource with `workloadType`. CLI remains a wrapper.
-
-## 10. Gap list
-
-RTL gaps from the previous review still apply (TTL policy, fork, license
-jitter, multi-spec snapshots). SoC adds only upper-layer gaps:
-
-| Gap | Handling |
-|---|---|
-| Remote GDB / telnet | P0: in-guest gdb + serial file. P1: WS bridge over `/proxy`. No kernel TCP proxy. |
-| Nested TAP/TUN | Forbidden. QEMU user-net. |
-| Nested `/dev/kvm` | Unavailable. QEMU TCG. RISC-V-on-x86 is TCG anyway. |
-| SoC run-state portability | QEMU/Renode checkpoint on `/mnt/work`. AgentENV pause restores in-place only. |
-
-## 11. Non-goals (P0)
-
-- Commercial EDA or Simics job support.
-- GPU / PCIe / dongles / nested KVM / nested TAP.
-- Modifying AgentENV orchestrator, Firecracker, overlaybd, or scheduler.
-- In-process hooks.
-- Cross-node fork; `fork` in regression demos.
-- Raw TCP port forwarding through AgentENV.
+Listed so P0 coding cannot smuggle scope: commercial job support, GUI,
+GPU/PCIe/dongles, nested KVM/TAP, AgentENV source changes, in-process
+hooks, fork in demos, raw TCP forwarding.

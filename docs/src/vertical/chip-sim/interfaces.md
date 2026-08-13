@@ -1,5 +1,9 @@
 # Chip-Sim Vertical: Interfaces and Layout
 
+Primary consumer is the **chip LLM agent**. These APIs exist to close
+generate → simulate → feedback. Humans use the same client via a thin
+CLI; they are not a second product.
+
 P0 SDK surface, AgentENV calls, and repository tree for **both**
 `rtl-sim` and `soc-sw-sim`. Semantics: [design.md](./design.md).
 Tests: [test-plan.md](./test-plan.md).
